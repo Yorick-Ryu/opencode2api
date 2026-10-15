@@ -22,13 +22,13 @@ func (e *ClientWriteError) Unwrap() error { return e.Err }
 // RotationStream holds role/start/usage events until useful content or a normal
 // terminal event. Ready commits the chosen model and stops the first-output
 // timer. Once committed, failures are emitted in-band and never replayed.
-func RotationStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, alias string, ready func() error) (usage Usage, reported, committed bool, result error) {
+func RotationStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, alias string, aliases ToolAliases, ready func() error) (usage Usage, reported, committed bool, result error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return usage, false, false, fmt.Errorf("streaming is unsupported")
 	}
 	parser := newStreamUsageObserver(from).parser
-	emitter := newBridgeStreamEmitter(w, flusher, to, alias)
+	emitter := newBridgeStreamEmitter(w, flusher, to, alias, aliases)
 	pending := []bridgeStreamEvent{}
 	var upstreamFailure error
 	emit := func(event bridgeStreamEvent) error {

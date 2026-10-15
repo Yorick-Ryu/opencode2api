@@ -73,6 +73,10 @@ type bridgeRequest struct {
 	FrequencyPenalty  any
 	PresencePenalty   any
 	Seed              any
+	// ToolAliases and DroppedTools describe how the client's tool declarations
+	// were re-encoded for a provider that accepts function tools only.
+	ToolAliases  ToolAliases
+	DroppedTools []string
 	// Native-fidelity knobs decoded from the client body and re-emitted
 	// upstream. prompt_cache_key is the big one: native opencode sends the
 	// session-sliced ID here and rides prompt-cache affinity; without it
@@ -108,14 +112,27 @@ type bridgeResponse struct {
 }
 
 func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, error) {
+	output, _, _, err := ConvertRequestWithTools(from, to, input)
+	return output, err
+}
+
+// ConvertRequestWithTools converts a request and reports how client tool
+// declarations were re-encoded for the target protocol: the aliases needed to
+// restore namespaced calls on the response path, and the declarations the
+// target cannot receive.
+func ConvertRequestWithTools(from, to Protocol, input map[string]any) (map[string]any, ToolAliases, []string, error) {
 	if from == to {
-		return jsonutil.CloneMap(input), nil
+		return jsonutil.CloneMap(input), nil, nil, nil
 	}
-	request, err := decodeBridgeRequest(from, input)
+	request, err := decodeBridgeRequest(from, to, input)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	return encodeBridgeRequest(to, request)
+	output, err := encodeBridgeRequest(to, request)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return output, request.ToolAliases, request.DroppedTools, nil
 }
 
 func normalizeResponsesRole(role string) string {

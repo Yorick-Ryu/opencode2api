@@ -10,7 +10,7 @@ import (
 	"opencode2api/internal/jsonutil"
 )
 
-func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
+func ConvertResponse(from, to Protocol, body []byte, aliases ToolAliases) ([]byte, error) {
 	if from == to {
 		return append([]byte(nil), body...), nil
 	}
@@ -25,7 +25,7 @@ func ConvertResponse(from, to Protocol, body []byte) ([]byte, error) {
 	if response.Error != "" || response.Stop == "error" {
 		return nil, fmt.Errorf("upstream response failed: %s", jsonutil.FirstString(response.Error, "upstream response failed"))
 	}
-	return json.Marshal(encodeBridgeResponse(to, response))
+	return json.Marshal(encodeBridgeResponse(to, response, aliases))
 }
 
 func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeResponse, error) {
@@ -140,7 +140,7 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 	return response, nil
 }
 
-func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string]any {
+func encodeBridgeResponse(protocol Protocol, response bridgeResponse, aliases ToolAliases) map[string]any {
 	if response.ID == "" {
 		response.ID = identity.RandomID("resp", 12)
 	}
@@ -210,14 +210,7 @@ func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string
 			})
 		}
 		for _, tool := range response.Tools {
-			output = append(output, map[string]any{
-				"id":        identity.RandomID("fc", 12),
-				"type":      "function_call",
-				"status":    "completed",
-				"call_id":   tool.ID,
-				"name":      tool.Name,
-				"arguments": bridgeArgumentsJSON(tool),
-			})
+			output = append(output, responsesFunctionCallItem(aliases, identity.RandomID("fc", 12), tool.Name, tool.ID, "completed", bridgeArgumentsJSON(tool)))
 		}
 		status := "completed"
 		var incomplete any

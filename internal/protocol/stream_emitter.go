@@ -44,6 +44,8 @@ type bridgeStreamEmitter struct {
 	tools map[string]*bridgeStreamTool
 	order []string
 
+	aliases ToolAliases
+
 	sequence        int
 	nextOutput      int
 	textOpen        bool
@@ -59,7 +61,7 @@ type bridgeStreamEmitter struct {
 	responseOutput  []any
 }
 
-func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string) *bridgeStreamEmitter {
+func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Protocol, model string, aliases ToolAliases) *bridgeStreamEmitter {
 	return &bridgeStreamEmitter{
 		w:       writer,
 		flush:   flusher,
@@ -67,6 +69,7 @@ func newBridgeStreamEmitter(writer io.Writer, flusher http.Flusher, target Proto
 		model:   model,
 		created: time.Now().Unix(),
 		tools:   map[string]*bridgeStreamTool{},
+		aliases: aliases,
 	}
 }
 
@@ -425,7 +428,7 @@ func (emitter *bridgeStreamEmitter) startTool(tool *bridgeStreamTool) error {
 	case Responses:
 		tool.Index = emitter.nextOutput
 		emitter.nextOutput++
-		item := map[string]any{"id": tool.ItemID, "type": "function_call", "status": "in_progress", "arguments": "", "call_id": tool.ID, "name": tool.Name}
+		item := responsesFunctionCallItem(emitter.aliases, tool.ItemID, tool.Name, tool.ID, "in_progress", "")
 		return emitter.sse("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()})
 	case Anthropic:
 		tool.AnthropicIndex = emitter.nextAnthropic
@@ -561,7 +564,7 @@ func (emitter *bridgeStreamEmitter) Finish() error {
 			tool := emitter.tools[key]
 			response.Tools = append(response.Tools, bridgeBlock{Kind: "tool_call", ID: tool.ID, Name: tool.Name, ArgumentsJSON: tool.Arguments.String()})
 		}
-		completed := encodeBridgeResponse(Responses, response)
+		completed := encodeBridgeResponse(Responses, response, emitter.aliases)
 		return emitter.sse("response.completed", map[string]any{"type": "response.completed", "response": completed, "sequence_number": emitter.nextSequence()})
 	}
 	return nil
@@ -597,7 +600,7 @@ func (emitter *bridgeStreamEmitter) finishResponsesItems() error {
 		if err := emitter.sse("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "arguments": arguments, "item_id": tool.ItemID, "output_index": tool.Index, "sequence_number": emitter.nextSequence()}); err != nil {
 			return err
 		}
-		item := map[string]any{"id": tool.ItemID, "type": "function_call", "status": "completed", "arguments": arguments, "call_id": tool.ID, "name": tool.Name}
+		item := responsesFunctionCallItem(emitter.aliases, tool.ItemID, tool.Name, tool.ID, "completed", arguments)
 		if err := emitter.sse("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()}); err != nil {
 			return err
 		}

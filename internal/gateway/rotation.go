@@ -175,12 +175,13 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		copyPayload[k] = v
 	}
 	copyPayload["model"] = route.ID
-	bodies, err := g.prepareRouteBodies(external, route, copyPayload)
+	bodies, toolAliases, err := g.prepareRouteBodies(external, route, copyPayload)
 	if err != nil {
 		result.err = err
 		result.reason = "request_conversion_error"
 		return result
 	}
+	aliases := toolAliases[config.TierGo]
 	body, shaped := g.shapeKeyBody(bodies[config.TierGo], route, config.TierGo)
 	cursor := g.goNodes.CursorFor(ids.Session)
 	var node *upstreamNode
@@ -261,7 +262,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			g.monitor.BeginStream()
 			defer g.monitor.EndStream()
 		}
-		usage, reported, committed, err := wire.RotationStream(original.Context(), w, resp.Body, route.Protocol, external, alias, ready)
+		usage, reported, committed, err := wire.RotationStream(original.Context(), w, resp.Body, route.Protocol, external, alias, aliases, ready)
 		if meta != nil {
 			meta.Usage = usage
 			meta.UsageReported = reported
@@ -295,7 +296,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		return result
 	}
 	if shaped {
-		b, err = wire.CollapseStream(bytes.NewReader(b), route.Protocol, route.ID)
+		b, err = wire.CollapseStream(bytes.NewReader(b), route.Protocol, route.ID, aliases)
 	}
 	var document map[string]any
 	if err == nil {
@@ -323,7 +324,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		}
 	}
 	if err == nil && external != route.Protocol {
-		b, err = wire.ConvertResponse(route.Protocol, external, b)
+		b, err = wire.ConvertResponse(route.Protocol, external, b, aliases)
 	}
 	if err != nil {
 		result.err = err

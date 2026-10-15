@@ -15,9 +15,18 @@ import (
 // the bridge. Target-protocol normalization then repairs reasoning history in
 // either case.
 func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string) (map[string]any, error) {
-	output, err := ConvertRequest(from, to, input)
+	output, _, _, err := PrepareRequestWithTools(from, to, input, upstreamURL)
+	return output, err
+}
+
+// PrepareRequestWithTools prepares the upstream body and reports how the
+// client's tool declarations were re-encoded: the aliases the response path
+// needs to restore namespaced calls, and the declarations this provider cannot
+// receive.
+func PrepareRequestWithTools(from, to Protocol, input map[string]any, upstreamURL string) (map[string]any, ToolAliases, []string, error) {
+	output, aliases, dropped, err := ConvertRequestWithTools(from, to, input)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if to == Responses {
 		// The bridge already floors converted bodies; a same-protocol body is
@@ -25,7 +34,7 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
 	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
-	return output, nil
+	return output, aliases, dropped, nil
 }
 
 // ForcedEffort applies an operator-configured thinking level to a prepared
@@ -348,7 +357,7 @@ func anthropicReasoning(input map[string]any) any {
 	return input["thinking"]
 }
 
-func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest, error) {
+func decodeBridgeRequest(from, to Protocol, input map[string]any) (bridgeRequest, error) {
 	request := bridgeRequest{
 		Model:       jsonutil.StringAt(input, "model"),
 		Stream:      jsonutil.BoolAt(input, "stream"),
@@ -356,7 +365,7 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		TopP:        input["top_p"],
 		Metadata:    input["metadata"],
 	}
-	switch protocol {
+	switch from {
 	case Chat:
 		request.MaxTokens = jsonutil.FirstAny(input["max_completion_tokens"], input["max_tokens"])
 		request.Stop = input["stop"]
@@ -443,6 +452,10 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 			return request, fmt.Errorf("instructions: %w", err)
 		}
 		request.System = append(request.System, instructions...)
+		// The provider accepts function tools only, so the client's declarations
+		// are re-encoded before the input history is decoded: a namespaced call
+		// in that history has to be rewritten to the name the provider saw.
+		request.Tools, request.ToolAliases, request.DroppedTools = responsesToolsForProvider(jsonutil.SliceAt(input, "tools"))
 		switch value := input["input"].(type) {
 		case string:
 			request.Messages = append(request.Messages, bridgeMessage{Role: "user", Blocks: []bridgeBlock{{Kind: "text", Text: value}}})
@@ -461,7 +474,7 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 					appendBridgeBlock(&request.Messages, "assistant", bridgeBlock{
 						Kind:          "tool_call",
 						ID:            jsonutil.FirstString(jsonutil.StringAt(item, "call_id"), jsonutil.StringAt(item, "id")),
-						Name:          jsonutil.StringAt(item, "name"),
+						Name:          request.ToolAliases.ProviderName(jsonutil.StringAt(item, "namespace"), jsonutil.StringAt(item, "name")),
 						ArgumentsJSON: jsonutil.StringAt(item, "arguments"),
 					})
 				case "function_call_output":
@@ -490,19 +503,11 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		default:
 			return request, fmt.Errorf("input must be a string or array")
 		}
-		for i, raw := range jsonutil.SliceAt(input, "tools") {
-			tool, ok := raw.(map[string]any)
-			if !ok || jsonutil.StringAt(tool, "type") != "function" {
-				return request, fmt.Errorf("tools[%d] must be a function tool", i)
-			}
-			request.Tools = append(request.Tools, bridgeTool{
-				Name:        jsonutil.StringAt(tool, "name"),
-				Description: jsonutil.StringAt(tool, "description"),
-				Schema:      tool["parameters"],
-				Strict:      jsonutil.BoolAt(tool, "strict"),
-			})
-		}
 		request.ToolChoice = decodeResponsesToolChoice(input["tool_choice"])
+		if request.ToolChoice.Mode == "named" {
+			choice, _ := input["tool_choice"].(map[string]any)
+			request.ToolChoice.Name = request.ToolAliases.ProviderName(jsonutil.StringAt(choice, "namespace"), request.ToolChoice.Name)
+		}
 		request.ResponseFormat = jsonutil.MapAt(input, "text", "format")
 		request.ParallelToolCalls = input["parallel_tool_calls"]
 		request.PromptCacheKey = input["prompt_cache_key"]
@@ -567,15 +572,15 @@ func decodeBridgeRequest(protocol Protocol, input map[string]any) (bridgeRequest
 		request.ToolChoice = decodeAnthropicToolChoice(input["tool_choice"])
 
 	default:
-		return request, fmt.Errorf("unsupported input protocol %q", protocol)
+		return request, fmt.Errorf("unsupported input protocol %q", from)
 	}
 	for i := range request.Messages {
 		for j := range request.Messages[i].Blocks {
 			block := &request.Messages[i].Blocks[j]
-			if block.Kind != "tool_result" || protocol == Chat {
+			if block.Kind != "tool_result" || from == Chat {
 				continue
 			}
-			result, err := decodeToolImages(protocol, block.Result)
+			result, err := decodeToolImages(from, block.Result)
 			if err != nil {
 				return request, fmt.Errorf("messages[%d].tool_result[%d]: %w", i, j, err)
 			}

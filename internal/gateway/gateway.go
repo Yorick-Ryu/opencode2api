@@ -201,7 +201,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			g.forwardSystemOne(w, r, body, payload, model, route)
 			return
 		}
-		bodies, err := g.prepareRouteBodies(external, route, payload)
+		bodies, toolAliases, err := g.prepareRouteBodies(external, route, payload)
 		if err != nil {
 			wire.WriteError(w, external, http.StatusBadRequest, err.Error(), "invalid_request_error", "")
 			return
@@ -274,7 +274,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			if external == upstreamRoute.Protocol {
 				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
 			} else {
-				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model)
+				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model, toolAliases[upstreamRoute.Tier])
 			}
 			if meta != nil {
 				meta.Usage, meta.UsageReported = usage, usageReported
@@ -301,7 +301,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			// The anonymous lane is served streaming (see prepareAnonymousBody);
 			// collapse the events back into the single document this
 			// non-streaming client asked for.
-			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
+			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model, toolAliases[upstreamRoute.Tier])
 			if err != nil {
 				g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
 				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
@@ -313,7 +313,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
 		if external != upstreamRoute.Protocol {
-			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody)
+			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody, toolAliases[upstreamRoute.Tier])
 			if err != nil {
 				g.logger.Warn("response protocol conversion failed", "component", "conversion", "event", "response_conversion_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "target_protocol", external, "error", err)
 				wire.WriteError(w, external, http.StatusBadGateway, "unsupported upstream response", "upstream_error", ids.Request)
@@ -451,7 +451,7 @@ func (g *Gateway) forwardSystemOne(w http.ResponseWriter, r *http.Request, body 
 	_, _ = w.Write(responseBody)
 }
 
-func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, input map[string]any) (map[config.Tier][]byte, error) {
+func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, input map[string]any) (map[config.Tier][]byte, map[config.Tier]wire.ToolAliases, error) {
 	tiers := make([]config.Tier, 0, len(route.KeyTiers)+1)
 	seen := make(map[config.Tier]bool, len(route.KeyTiers)+1)
 	addTier := func(tier config.Tier) {
@@ -466,16 +466,20 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 		addTier(tier)
 	}
 	if len(tiers) == 0 {
-		return nil, errors.New("no usable upstream tier")
+		return nil, nil, errors.New("no usable upstream tier")
 	}
 	bodies := make(map[config.Tier][]byte, len(tiers))
+	aliases := make(map[config.Tier]wire.ToolAliases, len(tiers))
 	for _, tier := range tiers {
 		protocol := route.ProtocolFor(tier)
 		baseURL := g.cfg.Upstream.Zen
 		if tier == config.TierGo {
 			baseURL = g.cfg.Upstream.Go
 		}
-		upstreamPayload, err := wire.PrepareRequest(from, protocol, input, baseURL)
+		upstreamPayload, tierAliases, droppedTools, err := wire.PrepareRequestWithTools(from, protocol, input, baseURL)
+		if droppedTools != nil {
+			g.logger.Debug("client tools without a provider equivalent were dropped", "component", "conversion", "event", "tools_dropped", "model", jsonutil.StringAt(input, "model"), "tier", tier, "protocol", protocol, "tools", droppedTools)
+		}
 		if err != nil {
 			if tier != route.Tier {
 				// A fallback tier may use a stricter wire format than the
@@ -485,18 +489,19 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 				g.logger.Debug("skipping fallback tier with incompatible request shape", "component", "conversion", "event", "fallback_tier_skipped", "model", jsonutil.StringAt(input, "model"), "tier", tier, "protocol", protocol, "error", err)
 				continue
 			}
-			return nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)
+			return nil, nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)
 		}
 		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
 		}
 		encoded, err := json.Marshal(upstreamPayload)
 		if err != nil {
-			return nil, errors.New("request contains unsupported JSON values")
+			return nil, nil, errors.New("request contains unsupported JSON values")
 		}
 		bodies[tier] = encoded
+		aliases[tier] = tierAliases
 	}
-	return bodies, nil
+	return bodies, aliases, nil
 }
 
 func copyErrorResponse(w http.ResponseWriter, protocol wire.Protocol, resp *http.Response, requestID string) {

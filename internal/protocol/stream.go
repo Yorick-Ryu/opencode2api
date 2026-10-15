@@ -44,7 +44,7 @@ type bridgeStreamEvent struct {
 // TranscodeStream is the request-aware form used by the
 // gateway. A cancelled client must not receive a synthetic upstream error
 // after its connection has gone away.
-func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string) (Usage, bool, error) {
+func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, from, to Protocol, model string, aliases ToolAliases) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
@@ -57,7 +57,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseArgs:      map[string]bool{},
 		responseReasoning: map[string]bool{},
 	}
-	emitter := newBridgeStreamEmitter(w, flusher, to, model)
+	emitter := newBridgeStreamEmitter(w, flusher, to, model, aliases)
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -179,7 +179,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 	if cause == nil {
 		cause = errSSEUnexpectedEOF
 	}
-	emitter := newBridgeStreamEmitter(w, flusher, protocol, model)
+	emitter := newBridgeStreamEmitter(w, flusher, protocol, model, nil)
 	if err := emitUnexpectedStreamError(emitter, cause); err != nil {
 		return usage, observer.Reported(), err
 	}

@@ -177,7 +177,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	}
 	reader := io.LimitReader(resp.Body, 1<<20)
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") && protocol != wire.SystemOne {
-		_, err = wire.CollapseStream(reader, protocol, model)
+		_, err = wire.CollapseStream(reader, protocol, model, nil)
 	} else {
 		var document map[string]any
 		err = json.NewDecoder(reader).Decode(&document)
