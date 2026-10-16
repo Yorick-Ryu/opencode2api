@@ -2,8 +2,10 @@
 package telemetry
 
 import (
+	"bufio"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -92,6 +94,12 @@ func (w *statusWriter) Write(data []byte) (int, error) {
 
 func (w *statusWriter) Flush() {
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+// Hijack delegates to the underlying writer so websocket upgrades keep working
+// behind the telemetry wrapper.
+func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
