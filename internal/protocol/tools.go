@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,10 @@ import (
 type ToolAlias struct {
 	Name      string // client-visible tool name
 	Namespace string // enclosing namespace, empty for top-level tools
+	// Custom marks a freeform custom tool (apply_patch) that was re-encoded as
+	// a function tool for a provider that only accepts function tools. The
+	// response path restores the custom_tool_call item shape.
+	Custom bool
 }
 
 // ToolAliases maps provider-visible function names to their client identity.
@@ -46,6 +51,13 @@ func (aliases ToolAliases) apply(providerName string) (string, string) {
 	return providerName, ""
 }
 
+// customTool reports whether the provider-visible function is a freeform custom
+// tool the request path re-encoded for a functions-only provider.
+func (aliases ToolAliases) customTool(providerName string) bool {
+	alias, ok := aliases[providerName]
+	return ok && alias.Custom
+}
+
 // qualifiedToolName is the provider-visible name of a namespace child, used
 // only when the plain child name is already taken by another declaration.
 func qualifiedToolName(namespace, name string) string {
@@ -62,15 +74,18 @@ func qualifiedToolName(namespace, name string) string {
 //
 // Namespace children become individually callable functions: the provider sees
 // the child's own name and the gateway restores the namespace on the response
-// path, so a Codex sub-agent call survives the round trip. Declarations without
-// a function equivalent — hosted tools such as web_search and custom
-// (freeform) tools — are reported as dropped instead of failing the request.
+// path, so a Codex sub-agent call survives the round trip. Freeform custom
+// tools (apply_patch) are re-encoded as function tools with a JSON input
+// field, mirroring CPA's conversion, and restored as custom_tool_call items on
+// the response path. Other declarations without a function equivalent — hosted
+// tools such as web_search — are reported as dropped instead of failing the
+// request.
 func responsesToolsForProvider(raw []any) ([]bridgeTool, ToolAliases, []string) {
 	tools := make([]bridgeTool, 0, len(raw))
 	aliases := ToolAliases{}
 	dropped := make([]string, 0)
 	used := make(map[string]bool, len(raw))
-	add := func(name, description string, schema any, strict bool, namespace string, aliasName string) {
+	add := func(name, description string, schema any, strict bool, namespace string, aliasName string) string {
 		providerName := name
 		for suffix := 2; used[providerName]; suffix++ {
 			providerName = fmt.Sprintf("%s_%d", name, suffix)
@@ -80,6 +95,7 @@ func responsesToolsForProvider(raw []any) ([]bridgeTool, ToolAliases, []string) 
 			aliases[providerName] = ToolAlias{Name: aliasName, Namespace: namespace}
 		}
 		tools = append(tools, bridgeTool{Name: providerName, Description: description, Schema: schema, Strict: strict})
+		return providerName
 	}
 	for _, entry := range raw {
 		tool, ok := entry.(map[string]any)
@@ -118,6 +134,23 @@ func responsesToolsForProvider(raw []any) ([]bridgeTool, ToolAliases, []string) 
 				}
 				add(qualifiedToolName(namespace, childName), description, child["parameters"], jsonutil.BoolAt(child, "strict"), namespace, childName)
 			}
+		case "custom":
+			// Freeform custom tools (apply_patch) have no function equivalent
+			// upstream, so they are re-encoded as a function with a single
+			// input string field and restored on the response path.
+			name := jsonutil.StringAt(tool, "name")
+			if name == "" {
+				dropped = append(dropped, "custom")
+				continue
+			}
+			description := jsonutil.StringAt(tool, "description")
+			schema := any(json.RawMessage(customToolParametersJSON))
+			if name == "apply_patch" {
+				description = applyPatchDescription(tool)
+				schema = json.RawMessage(applyPatchParametersJSON)
+			}
+			providerName := add(name, description, schema, false, "", "")
+			aliases[providerName] = ToolAlias{Name: name, Custom: true}
 		default:
 			name := jsonutil.StringAt(tool, "name")
 			if name == "" {
@@ -130,6 +163,9 @@ func responsesToolsForProvider(raw []any) ([]bridgeTool, ToolAliases, []string) 
 	}
 	if len(tools) == 0 {
 		return nil, aliases, dropped
+	}
+	if len(dropped) == 0 {
+		dropped = nil
 	}
 	return tools, aliases, dropped
 }
@@ -152,6 +188,108 @@ func responsesFunctionCallItem(aliases ToolAliases, itemID, providerName, callID
 		item["namespace"] = namespace
 	}
 	return item
+}
+
+// responsesCustomToolCallItem renders a converted freeform tool call as the
+// Responses custom_tool_call item the client declared.
+func responsesCustomToolCallItem(aliases ToolAliases, itemID, providerName, callID, status, input string) map[string]any {
+	name, namespace := aliases.apply(providerName)
+	if name == "" {
+		name = providerName
+	}
+	item := map[string]any{
+		"id":      itemID,
+		"type":    "custom_tool_call",
+		"status":  status,
+		"call_id": callID,
+		"name":    name,
+		"input":   input,
+	}
+	if namespace != "" {
+		item["namespace"] = namespace
+	}
+	return item
+}
+
+// Freeform custom tools reach functions-only providers as function tools with
+// a JSON input field. The schema and patch instructions mirror CPA's
+// conversion (internal/client/codex/apply-patch) so the model keeps producing
+// the Codex patch grammar.
+const applyPatchParametersJSON = `{"type":"object","properties":{"input":{"type":"string","description":"The complete apply_patch patch text."}},"required":["input"],"additionalProperties":false}`
+
+const applyPatchInstructions = `Call this function with a JSON object whose input field contains the complete patch text.
+Use the Codex apply_patch format, not a conventional git unified diff.
+Start with *** Begin Patch and end with *** End Patch.
+Use *** Add File: path, *** Delete File: path, or *** Update File: path.
+Every added-file content line starts with +.
+For updates, use @@; context lines start with one space, removed lines with -, and added lines with +.
+Use *** Move to: path for a rename and *** End of File when required by the patch grammar.
+Example input:
+*** Begin Patch
+*** Update File: src/main.go
+@@
+-old
++new
+*** End Patch`
+
+const customToolParametersJSON = `{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`
+
+const freeformToolSentence = "This is a FREEFORM tool, so do not wrap the patch in JSON."
+
+// applyPatchDescription rewrites the freeform apply_patch description for a
+// provider that receives the tool as a JSON-schema function.
+func applyPatchDescription(tool map[string]any) string {
+	original := strings.ReplaceAll(jsonutil.StringAt(tool, "description"), freeformToolSentence, "")
+	var description strings.Builder
+	if trimmed := strings.TrimSpace(original); trimmed != "" {
+		description.WriteString(trimmed)
+		description.WriteString("\n\n")
+	}
+	description.WriteString(applyPatchInstructions)
+	grammar := jsonutil.StringAt(tool, "format", "definition")
+	if grammar != "" {
+		if strings.Contains(grammar, "*** Environment ID:") {
+			description.WriteString("\n\nUse *** Environment ID: as specified by the patch grammar.")
+		}
+		description.WriteString("\n\nOriginal patch grammar:\n")
+		description.WriteString(grammar)
+	}
+	return description.String()
+}
+
+// wrapCustomToolArguments encodes freeform tool input as the function arguments
+// object the provider saw; the history conversion sends it back upstream.
+func wrapCustomToolArguments(input string) string {
+	encoded, err := json.Marshal(map[string]string{"input": input})
+	if err != nil {
+		return `{"input":""}`
+	}
+	return string(encoded)
+}
+
+// unwrapCustomToolArguments decodes provider function arguments back into
+// freeform input. A provider that ignored the wrapper (plain patch text or a
+// bare JSON string) is accepted as-is instead of failing the turn.
+func unwrapCustomToolArguments(arguments string) string {
+	trimmed := strings.TrimSpace(arguments)
+	if trimmed == "" || trimmed == "{}" {
+		return ""
+	}
+	var payload struct {
+		Input json.RawMessage `json:"input"`
+	}
+	if json.Unmarshal([]byte(trimmed), &payload) == nil && len(payload.Input) > 0 {
+		var text string
+		if json.Unmarshal(payload.Input, &text) == nil {
+			return text
+		}
+		return string(payload.Input)
+	}
+	var text string
+	if json.Unmarshal([]byte(trimmed), &text) == nil {
+		return text
+	}
+	return arguments
 }
 
 // collectResponsesNamespaces records namespaced tool declarations under the

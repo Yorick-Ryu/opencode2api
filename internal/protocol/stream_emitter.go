@@ -428,6 +428,10 @@ func (emitter *bridgeStreamEmitter) startTool(tool *bridgeStreamTool) error {
 	case Responses:
 		tool.Index = emitter.nextOutput
 		emitter.nextOutput++
+		if emitter.aliases.customTool(tool.Name) {
+			item := responsesCustomToolCallItem(emitter.aliases, tool.ItemID, tool.Name, tool.ID, "in_progress", "")
+			return emitter.sse("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()})
+		}
 		item := responsesFunctionCallItem(emitter.aliases, tool.ItemID, tool.Name, tool.ID, "in_progress", "")
 		return emitter.sse("response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()})
 	case Anthropic:
@@ -452,6 +456,12 @@ func (emitter *bridgeStreamEmitter) emitToolDelta(tool *bridgeStreamTool, delta 
 			"function": map[string]any{"arguments": delta},
 		}}}, nil)
 	case Responses:
+		if emitter.aliases.customTool(tool.Name) {
+			// Freeform input is emitted whole when the call completes: the
+			// provider streams a JSON wrapper, while the client parses the
+			// patch grammar itself.
+			return nil
+		}
 		return emitter.sse("response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "delta": delta, "item_id": tool.ItemID, "output_index": tool.Index, "sequence_number": emitter.nextSequence()})
 	case Anthropic:
 		return emitter.sse("content_block_delta", map[string]any{"type": "content_block_delta", "index": tool.AnthropicIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": delta}})
@@ -594,6 +604,12 @@ func (emitter *bridgeStreamEmitter) finishResponsesItems() error {
 		if err := emitter.startTool(tool); err != nil {
 			return err
 		}
+		if emitter.aliases.customTool(tool.Name) {
+			if err := emitter.finishCustomTool(tool, arguments); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := emitter.emitPendingToolArguments(tool); err != nil {
 			return err
 		}
@@ -606,6 +622,26 @@ func (emitter *bridgeStreamEmitter) finishResponsesItems() error {
 		}
 	}
 	return nil
+}
+
+// finishCustomTool emits one converted freeform call: a single input delta for
+// the client's live diff view and the completed custom_tool_call item.
+func (emitter *bridgeStreamEmitter) finishCustomTool(tool *bridgeStreamTool, arguments string) error {
+	input := unwrapCustomToolArguments(arguments)
+	if input != "" {
+		if err := emitter.sse("response.custom_tool_call_input.delta", map[string]any{
+			"type":            "response.custom_tool_call_input.delta",
+			"delta":           input,
+			"item_id":         tool.ItemID,
+			"call_id":         tool.ID,
+			"output_index":    tool.Index,
+			"sequence_number": emitter.nextSequence(),
+		}); err != nil {
+			return err
+		}
+	}
+	item := responsesCustomToolCallItem(emitter.aliases, tool.ItemID, tool.Name, tool.ID, "completed", input)
+	return emitter.sse("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": tool.Index, "item": item, "sequence_number": emitter.nextSequence()})
 }
 
 func (emitter *bridgeStreamEmitter) chatChunk(delta map[string]any, finish any) error {

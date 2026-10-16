@@ -210,6 +210,11 @@ func encodeBridgeResponse(protocol Protocol, response bridgeResponse, aliases To
 			})
 		}
 		for _, tool := range response.Tools {
+			if aliases.customTool(tool.Name) {
+				input := unwrapCustomToolArguments(bridgeArgumentsJSON(tool))
+				output = append(output, responsesCustomToolCallItem(aliases, identity.RandomID("ctc", 12), tool.Name, tool.ID, "completed", input))
+				continue
+			}
 			output = append(output, responsesFunctionCallItem(aliases, identity.RandomID("fc", 12), tool.Name, tool.ID, "completed", bridgeArgumentsJSON(tool)))
 		}
 		status := "completed"

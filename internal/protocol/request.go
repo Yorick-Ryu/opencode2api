@@ -477,7 +477,17 @@ func decodeBridgeRequest(from, to Protocol, input map[string]any) (bridgeRequest
 						Name:          request.ToolAliases.ProviderName(jsonutil.StringAt(item, "namespace"), jsonutil.StringAt(item, "name")),
 						ArgumentsJSON: jsonutil.StringAt(item, "arguments"),
 					})
-				case "function_call_output":
+				case "custom_tool_call":
+					// Freeform custom tools (apply_patch) were re-encoded as
+					// functions for this provider, so their history is sent back
+					// in the wrapped form the provider produced.
+					appendBridgeBlock(&request.Messages, "assistant", bridgeBlock{
+						Kind:          "tool_call",
+						ID:            jsonutil.FirstString(jsonutil.StringAt(item, "call_id"), jsonutil.StringAt(item, "id")),
+						Name:          request.ToolAliases.ProviderName("", jsonutil.StringAt(item, "name")),
+						ArgumentsJSON: wrapCustomToolArguments(jsonutil.StringAt(item, "input")),
+					})
+				case "function_call_output", "custom_tool_call_output":
 					appendBridgeBlock(&request.Messages, "user", bridgeBlock{
 						Kind:   "tool_result",
 						CallID: jsonutil.StringAt(item, "call_id"),
