@@ -122,7 +122,16 @@ func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, er
 // target cannot receive.
 func ConvertRequestWithTools(from, to Protocol, input map[string]any) (map[string]any, ToolAliases, []string, error) {
 	if from == to {
-		return jsonutil.CloneMap(input), nil, nil, nil
+		output := jsonutil.CloneMap(input)
+		if from == Responses {
+			// A Responses provider keeps the client's declarations but answers
+			// with the dotted name of a namespace child, so the mapping has to
+			// travel back out with the request.
+			namespaces := collectResponsesNamespaces(jsonutil.SliceAt(output, "tools"))
+			dropped := rewriteResponsesPassthroughRequest(output, namespaces)
+			return output, namespaces, dropped, nil
+		}
+		return output, nil, nil, nil
 	}
 	request, err := decodeBridgeRequest(from, to, input)
 	if err != nil {

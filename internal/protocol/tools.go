@@ -153,3 +153,110 @@ func responsesFunctionCallItem(aliases ToolAliases, itemID, providerName, callID
 	}
 	return item
 }
+
+// collectResponsesNamespaces records namespaced tool declarations under the
+// dotted name a Responses provider uses for namespace children
+// ("multi_agent_v1.spawn_agent"). Such a provider accepts the namespace
+// declaration but answers with the dotted name, which the client cannot resolve.
+func collectResponsesNamespaces(tools []any) ToolAliases {
+	namespaces := ToolAliases{}
+	for _, entry := range tools {
+		tool, ok := entry.(map[string]any)
+		if !ok || jsonutil.StringAt(tool, "type") != "namespace" {
+			continue
+		}
+		namespace := jsonutil.StringAt(tool, "name")
+		if namespace == "" {
+			continue
+		}
+		for _, childEntry := range jsonutil.SliceAt(tool, "tools") {
+			child, ok := childEntry.(map[string]any)
+			if !ok {
+				continue
+			}
+			childName := jsonutil.StringAt(child, "name")
+			if childName == "" {
+				continue
+			}
+			if childType := jsonutil.StringAt(child, "type"); childType != "" && childType != "function" {
+				continue
+			}
+			namespaces[namespace+"."+childName] = ToolAlias{Name: childName, Namespace: namespace}
+		}
+	}
+	if len(namespaces) == 0 {
+		return nil
+	}
+	return namespaces
+}
+
+// restoreResponsesNamespace rewrites a provider call named "namespace.child"
+// into the name and namespace pair the client declared. It reports whether the
+// call belonged to a declared namespace.
+func restoreResponsesNamespace(namespaces ToolAliases, item map[string]any) bool {
+	name := jsonutil.StringAt(item, "name")
+	alias, ok := namespaces[name]
+	if !ok {
+		return false
+	}
+	item["name"] = alias.Name
+	item["namespace"] = alias.Namespace
+	return true
+}
+
+// rewriteResponsesPassthroughRequest adapts a Responses request that is relayed
+// to a Responses provider verbatim: namespaced calls in the history are
+// rewritten to the provider's dotted form so they match what the provider
+// produced, and declarations the provider rejects are dropped. It returns the
+// dropped declarations.
+func rewriteResponsesPassthroughRequest(input map[string]any, namespaces ToolAliases) []string {
+	dropped := make([]string, 0)
+	if tools := jsonutil.SliceAt(input, "tools"); tools != nil {
+		kept := make([]any, 0, len(tools))
+		for _, entry := range tools {
+			tool, ok := entry.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch jsonutil.StringAt(tool, "type") {
+			case "local_shell", "custom":
+				// Zen rejects both with "not supported on this endpoint";
+				// forwarding them fails the whole request.
+				name := jsonutil.StringAt(tool, "name")
+				if name == "" {
+					name = jsonutil.StringAt(tool, "type")
+				}
+				dropped = append(dropped, name)
+			default:
+				kept = append(kept, tool)
+			}
+		}
+		input["tools"] = kept
+	}
+	for _, raw := range jsonutil.SliceAt(input, "input") {
+		item, ok := raw.(map[string]any)
+		if !ok || jsonutil.StringAt(item, "type") != "function_call" {
+			continue
+		}
+		namespace := jsonutil.StringAt(item, "namespace")
+		name := jsonutil.StringAt(item, "name")
+		if namespace == "" || name == "" {
+			continue
+		}
+		if providerName := namespaces.ProviderName(namespace, name); providerName != name {
+			item["name"] = providerName
+		} else {
+			item["name"] = namespace + "." + name
+		}
+		delete(item, "namespace")
+	}
+	if choice, ok := input["tool_choice"].(map[string]any); ok {
+		if namespace := jsonutil.StringAt(choice, "namespace"); namespace != "" {
+			if name := jsonutil.StringAt(choice, "name"); name != "" {
+				choice["name"] = namespace + "." + name
+				delete(choice, "namespace")
+			}
+		}
+	}
+	return dropped
+}

@@ -149,13 +149,19 @@ func (writer *sseFlushWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string) (Usage, bool, error) {
+func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader, protocol Protocol, model string, namespaces ToolAliases) (Usage, bool, error) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return Usage{}, false, fmt.Errorf("response writer does not support streaming")
 	}
 	observer := newStreamUsageObserver(protocol)
-	_, copyErr := io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, io.TeeReader(reader, observer))
+	sink := io.TeeReader(reader, observer)
+	var copyErr error
+	if rewriter := newResponsesPassthroughRewriter(namespaces); rewriter != nil {
+		copyErr = rewriter.copyStream(&sseFlushWriter{writer: w, flusher: flusher}, sink)
+	} else {
+		_, copyErr = io.Copy(&sseFlushWriter{writer: w, flusher: flusher}, sink)
+	}
 	usage := observer.Finish()
 	if observer.ErrorTermination() {
 		if copyErr != nil {

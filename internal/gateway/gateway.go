@@ -272,7 +272,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
-				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model)
+				usage, usageReported, err = wire.ForwardStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, model, toolAliases[upstreamRoute.Tier])
 			} else {
 				usage, usageReported, err = wire.TranscodeStream(r.Context(), w, resp.Body, upstreamRoute.Protocol, external, model, toolAliases[upstreamRoute.Tier])
 			}
@@ -312,7 +312,9 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
 			meta.Usage, meta.UsageReported = usage, reported
 		}
-		if external != upstreamRoute.Protocol {
+		if external == upstreamRoute.Protocol {
+			responseBody = wire.RewriteResponsesDocument(responseBody, toolAliases[upstreamRoute.Tier])
+		} else {
 			responseBody, err = wire.ConvertResponse(upstreamRoute.Protocol, external, responseBody, toolAliases[upstreamRoute.Tier])
 			if err != nil {
 				g.logger.Warn("response protocol conversion failed", "component", "conversion", "event", "response_conversion_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "target_protocol", external, "error", err)

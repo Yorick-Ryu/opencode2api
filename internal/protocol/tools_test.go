@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -154,4 +155,109 @@ func TestFunctionToolsPassThroughUnchanged(t *testing.T) {
 func jsonString(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+// A Responses provider accepts a namespace declaration but answers with the
+// dotted child name, which Codex cannot resolve against its tool registry.
+func TestPassthroughRestoresDottedNamespaceCalls(t *testing.T) {
+	input := map[string]any{
+		"model": "muse-spark-1.3",
+		"input": "spawn one agent",
+		"tools": []any{
+			map[string]any{"type": "function", "name": "exec_command", "parameters": map[string]any{"type": "object"}},
+			map[string]any{
+				"type":        "namespace",
+				"name":        "multi_agent_v1",
+				"description": "Sub-agent tools.",
+				"tools": []any{
+					map[string]any{"type": "function", "name": "spawn_agent", "parameters": map[string]any{"type": "object"}},
+				},
+			},
+			map[string]any{"type": "local_shell"},
+		},
+	}
+
+	output, namespaces, dropped, err := ConvertRequestWithTools(Responses, Responses, input)
+	if err != nil {
+		t.Fatalf("ConvertRequestWithTools: %v", err)
+	}
+	if _, ok := namespaces["multi_agent_v1.spawn_agent"]; !ok {
+		t.Fatalf("namespace mapping missing: %v", namespaces)
+	}
+	if len(dropped) != 1 || dropped[0] != "local_shell" {
+		t.Fatalf("local_shell should be dropped, got %v", dropped)
+	}
+	tools, _ := output["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("expected the namespace declaration to survive, got %v", tools)
+	}
+
+	// The provider answers with the dotted name in every event that names a call.
+	for _, event := range []string{
+		`{"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","name":"multi_agent_v1.spawn_agent","call_id":"call_1"}}`,
+		`{"type":"response.function_call_arguments.done","name":"multi_agent_v1.spawn_agent","arguments":"{}"}`,
+		`{"type":"response.completed","response":{"output":[{"id":"fc_1","type":"function_call","name":"multi_agent_v1.spawn_agent","call_id":"call_1"}]}}`,
+	} {
+		rewritten := RewriteResponsesDocument([]byte(`{"output":[{"type":"function_call","name":"multi_agent_v1.spawn_agent","call_id":"call_1"}]}`), namespaces)
+		decoded := decodeJSON(t, rewritten)
+		items, _ := decoded["output"].([]any)
+		item, _ := items[0].(map[string]any)
+		if item["name"] != "spawn_agent" || item["namespace"] != "multi_agent_v1" {
+			t.Fatalf("document rewrite failed: %v", item)
+		}
+
+		rewriter := newResponsesPassthroughRewriter(namespaces)
+		line := rewriter.rewriteLine([]byte("data: " + event + "\n"))
+		if string(line) == "data: "+event+"\n" {
+			t.Fatalf("event was not rewritten: %s", event)
+		}
+		if !strings.Contains(string(line), `"name":"spawn_agent"`) || !strings.Contains(string(line), `"namespace":"multi_agent_v1"`) {
+			t.Fatalf("rewritten event lost the namespace: %s", line)
+		}
+	}
+}
+
+// The client's next turn carries the restored name and namespace; the provider
+// has to see the dotted form it produced.
+func TestPassthroughRewritesNamespacedHistory(t *testing.T) {
+	input := map[string]any{
+		"model": "muse-spark-1.3",
+		"input": []any{
+			map[string]any{"type": "function_call", "call_id": "call_1", "name": "spawn_agent", "namespace": "multi_agent_v1", "arguments": "{}"},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "hi"},
+		},
+		"tools": []any{
+			map[string]any{
+				"type": "namespace", "name": "multi_agent_v1", "description": "Sub-agent tools.",
+				"tools": []any{map[string]any{"type": "function", "name": "spawn_agent", "parameters": map[string]any{"type": "object"}}},
+			},
+		},
+	}
+
+	output, _, _, err := ConvertRequestWithTools(Responses, Responses, input)
+	if err != nil {
+		t.Fatalf("ConvertRequestWithTools: %v", err)
+	}
+	items, _ := output["input"].([]any)
+	call, _ := items[0].(map[string]any)
+	if call["name"] != "multi_agent_v1.spawn_agent" {
+		t.Fatalf("history call kept the client name: %v", call)
+	}
+	if _, exists := call["namespace"]; exists {
+		t.Fatalf("history call still carries the namespace field: %v", call)
+	}
+}
+
+// Events and documents without namespaced calls must be forwarded untouched.
+func TestPassthroughLeavesOtherPayloadsAlone(t *testing.T) {
+	namespaces := ToolAliases{"multi_agent_v1.spawn_agent": {Name: "spawn_agent", Namespace: "multi_agent_v1"}}
+	rewriter := newResponsesPassthroughRewriter(namespaces)
+	line := []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"multi_agent_v1.spawn_agent\"}\n")
+	if got := string(rewriter.rewriteLine(line)); got != string(line) {
+		t.Fatalf("delta event should pass through: %s", got)
+	}
+	document := []byte(`{"output":[{"type":"message","content":[{"type":"output_text","text":"hi"}]}]}`)
+	if got := string(RewriteResponsesDocument(document, namespaces)); got != string(document) {
+		t.Fatalf("document should pass through: %s", got)
+	}
 }
