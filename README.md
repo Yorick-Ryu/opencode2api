@@ -115,9 +115,18 @@ Send `Authorization: Bearer YOUR_LOCAL_API_KEY` or `x-api-key: YOUR_LOCAL_API_KE
 | GET    | `/v1/models`           | Models that can be routed with the current configuration. |
 | POST   | `/v1/chat/completions` | Chat Completions.                                         |
 | POST   | `/v1/responses`        | Responses.                                                |
+| GET    | `/v1/responses`        | Responses over WebSocket: `response.create` messages in, streamed event frames out. |
 | POST   | `/v1/messages`         | Anthropic Messages.                                       |
 | POST   | `/v1/systemone`        | System One structured decisions.                          |
 | GET    | `/healthz`             | Readiness and resource summary.                           |
+
+The WebSocket endpoint speaks the Codex Responses transport and converts it to
+the HTTP upstream, which has no WebSocket mode: each `response.create` runs
+through the normal pipeline and its SSE events are written back as text frames.
+`generate=false` warm-ups are acknowledged locally, `previous_response_id`
+follow-ups and incremental deltas are merged into the full transcript, and
+`response.interrupt` answers `response.incomplete` (`reason: interrupted`) while
+cancelling the in-flight upstream request.
 
 Discover an available model first:
 
