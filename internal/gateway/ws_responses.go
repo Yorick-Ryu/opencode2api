@@ -68,9 +68,9 @@ func (g *Gateway) handleResponsesWebSocket(w http.ResponseWriter, r *http.Reques
 		cancel:  cancel,
 	}
 	session.execute = session.executeInference
-	g.logger.Debug("responses websocket opened", "component", "gateway", "event", "ws_opened")
+	g.logger.Info("responses websocket opened", "component", "gateway", "event", "ws_opened", "remote", r.RemoteAddr)
 	session.run()
-	g.logger.Debug("responses websocket closed", "component", "gateway", "event", "ws_closed")
+	g.logger.Info("responses websocket closed", "component", "gateway", "event", "ws_closed", "remote", r.RemoteAddr)
 }
 
 // responsesWSActive tracks one in-flight response.create.
@@ -223,7 +223,7 @@ func (s *responsesWSSession) handleCreate(message []byte) {
 	active.cancel = cancel
 	s.active = active
 	s.mu.Unlock()
-	s.logger.Debug("responses websocket request", "component", "gateway", "event", "ws_create", "mode", mode, "model", wsBodyString(body, "model"), "bytes", len(body))
+	s.logger.Info("responses websocket request", "component", "gateway", "event", "ws_create", "mode", mode, "model", wsBodyString(body, "model"), "bytes", len(body))
 	go s.runCreate(ctx, active, body)
 }
 
