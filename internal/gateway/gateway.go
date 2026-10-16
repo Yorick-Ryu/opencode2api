@@ -145,6 +145,25 @@ func (g *Gateway) authenticate(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// subagentModel returns the upstream model an operator assigned to sub-agent
+// traffic, or an empty string when the request is not a sub-agent request or no
+// model is configured. The configured model must be routable here: an unknown
+// name would fail the request, so the client's own model is kept instead.
+func (g *Gateway) subagentModel(payload map[string]any) string {
+	configured := strings.TrimSpace(g.cfg.Subagents.Model)
+	if configured == "" || !g.catalog.Supported(configured) {
+		return ""
+	}
+	marker := jsonutil.AnyAt(payload, strings.Split(g.cfg.Subagents.MarkerPath(), ".")...)
+	if text, ok := marker.(string); ok && strings.TrimSpace(text) == "" {
+		return ""
+	}
+	if marker == nil {
+		return ""
+	}
+	return configured
+}
+
 func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
@@ -165,6 +184,18 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		if model == "" {
 			wire.WriteError(w, external, http.StatusBadRequest, "model is required", "invalid_request_error", "model")
 			return
+		}
+		// Codex marks sub-agent traffic in client_metadata. An operator can have
+		// that traffic served by a different upstream model, so a model that
+		// cannot search can delegate to one that can without being selectable in
+		// the client.
+		if subagentModel := g.subagentModel(payload); subagentModel != "" && subagentModel != model {
+			g.logger.Debug("sub-agent request served by the configured model", "component", "routing", "event", "subagent_model", "requested_model", model, "served_by", subagentModel)
+			model = subagentModel
+			payload["model"] = model
+		}
+		if meta != nil {
+			meta.Model = model
 		}
 		if id := g.rotation.GroupID(model); id != "" {
 			g.handleRotation(w, r, external, payload, id, model)

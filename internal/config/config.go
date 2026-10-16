@@ -33,8 +33,31 @@ type Config struct {
 	WebUI             WebUIConfig                  `json:"webui"`
 	Prefer            Tier                         `json:"prefer"`
 	Reasoning         ReasoningConfig              `json:"reasoning"`
+	Subagents         SubagentConfig               `json:"subagents"`
 
 	effectiveProxies []string
+}
+
+// SubagentConfig serves client sub-agent traffic with a different upstream
+// model. Codex marks a sub-agent request with client_metadata.x-openai-subagent
+// while the main thread keeps its own model, so a client that cannot name the
+// model (or must not see it) can still delegate work to it. An empty Model
+// disables the remap.
+type SubagentConfig struct {
+	Model  string `json:"model"`
+	Marker string `json:"marker,omitempty"`
+}
+
+// DefaultSubagentMarker is the client_metadata field Codex sets on sub-agent
+// requests.
+const DefaultSubagentMarker = "client_metadata.x-openai-subagent"
+
+// MarkerPath returns the dotted JSON path that identifies a sub-agent request.
+func (s SubagentConfig) MarkerPath() string {
+	if path := strings.TrimSpace(s.Marker); path != "" {
+		return path
+	}
+	return DefaultSubagentMarker
 }
 
 // ReasoningConfig forces a thinking level for requests that do not state one.
@@ -175,6 +198,11 @@ func Normalize(path string, cfg Config) (Config, error) {
 	}
 	if cfg.Listen == "" {
 		return Config{}, errors.New("listen must not be empty")
+	}
+	cfg.Subagents.Model = strings.TrimSpace(cfg.Subagents.Model)
+	cfg.Subagents.Marker = strings.TrimSpace(cfg.Subagents.Marker)
+	if cfg.Subagents.Model == "" && cfg.Subagents.Marker != "" {
+		return Config{}, errors.New("subagents.marker requires subagents.model")
 	}
 	cfg.Upstream.Zen = strings.TrimSpace(cfg.Upstream.Zen)
 	cfg.Upstream.Go = strings.TrimSpace(cfg.Upstream.Go)

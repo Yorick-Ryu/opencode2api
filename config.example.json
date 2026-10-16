@@ -1,10 +1,16 @@
 {
   "listen": "127.0.0.1:8080",
-  "server_keys": ["change-this-local-key"],
-  "zen_keys": ["sk-your-zen-key"],
+  "server_keys": [
+    "change-this-local-key"
+  ],
+  "zen_keys": [
+    "sk-your-zen-key"
+  ],
   "go_keys": [],
   "anonymous": false,
-  "proxies": ["direct"],
+  "proxies": [
+    "direct"
+  ],
   "proxyfile": "",
   "upstream": {
     "zen": "https://opencode.ai/zen",
@@ -50,12 +56,21 @@
   "rotation": {
     "sota": {
       "alias": "sota",
-      "order": ["deepseek-v4.1-flash", "glm-5.3", "grok-4.6", "kimi-k3", "qwen3.8-max"]
+      "order": [
+        "deepseek-v4.1-flash",
+        "glm-5.3",
+        "grok-4.6",
+        "kimi-k3",
+        "qwen3.8-max"
+      ]
     },
     "sweet": {
       "alias": "sweet",
       "order": []
     },
     "first_output_seconds": 30
+  },
+  "subagents": {
+    "model": ""
   }
 }
