@@ -357,6 +357,11 @@ func rewriteResponsesPassthroughRequest(input map[string]any, namespaces ToolAli
 				continue
 			}
 			switch jsonutil.StringAt(tool, "type") {
+			case "web_search":
+				// Zen accepts this option only on web_search_preview, while
+				// Codex also sends it with the current web_search tool.
+				delete(tool, "search_content_types")
+				kept = append(kept, tool)
 			case "local_shell", "custom":
 				// Zen rejects both with "not supported on this endpoint";
 				// forwarding them fails the whole request.

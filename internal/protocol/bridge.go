@@ -121,8 +121,15 @@ func ConvertRequest(from, to Protocol, input map[string]any) (map[string]any, er
 // restore namespaced calls on the response path, and the declarations the
 // target cannot receive.
 func ConvertRequestWithTools(from, to Protocol, input map[string]any) (map[string]any, ToolAliases, []string, error) {
+	if from == Responses {
+		input = jsonutil.CloneMap(input)
+		normalizeCodexAgentMessages(input)
+	}
 	if from == to {
-		output := jsonutil.CloneMap(input)
+		output := input
+		if from != Responses {
+			output = jsonutil.CloneMap(input)
+		}
 		if from == Responses {
 			// A Responses provider keeps the client's declarations but answers
 			// with the dotted name of a namespace child, so the mapping has to
